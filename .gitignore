@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.idea/
+.DS_Store
+Thumbs.db
+encoding_results.txt
+arithmetic_results.txt
+bwt_results.txt
+mtf_results.txt
