@@ -7,92 +7,125 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QFont
 from PyQt5.QtCore import Qt
+from decimal import Decimal, getcontext  # decimal даёт управляемую точность вместо float
 
 
-# --- Функции кодирования (без изменений) ---
+# --- функции кодирования ---
+
+# поэтому вместо float используется decimal с повышением precision относительно длины входа.
 
 def arithmetic_encode(text):
+    # арифметическое кодирование на интервале [0,1):
+    # 1) считаем частоты символов во входе и превращаем их в вероятности
+    # 2) строим кумулятивные интервалы для символов (префиксные суммы вероятностей)
+    # 3) для каждого символа последовательно сужаем рабочий интервал [low, high)
+    #    в пропорции к интервалу соответствующего символа
+    # 4) любой номер внутри финального интервала является кодом сообщения
+    # технически используем Decimal для высокой точности на длинных строках
+    # (устанавливаем precision пропорционально длине текста)
+    getcontext().prec = max(50, len(text) * 2)  # эмпирически достаточная точность для учебных примеров
+
     frequencies = defaultdict(int)
     for char in text:
         frequencies[char] += 1
 
-    total_symbols = len(text)
-    probabilities = {char: freq / total_symbols for char, freq in frequencies.items()}
+    # общее число символов и вероятности (как Decimal)
+    total_symbols = Decimal(len(text))
+    probabilities = {char: Decimal(freq) / total_symbols for char, freq in frequencies.items()}  # p(x)
 
-    cumulative_prob = 0.0
+    # строим кумулятивные интервалы для каждого символа в порядке сортировки
+    cumulative_prob = Decimal(0)
     intervals = {}
     interval_log = []
     for char, prob in sorted(probabilities.items()):
-        intervals[char] = (cumulative_prob, cumulative_prob + prob)
+        intervals[char] = (cumulative_prob, cumulative_prob + prob)  # полуинтервал [low, high)
         interval_log.append((char, cumulative_prob, cumulative_prob + prob))
         cumulative_prob += prob
 
-    low, high = 0.0, 1.0
+    # последовательно сужаем интервал [low, high)
+    low, high = Decimal(0), Decimal(1)
     calculation_steps = []
     for char in text:
         char_low, char_high = intervals[char]
-        range_width = high - low
+        range_width = high - low  # ширина текущего рабочего интервала
         high = low + range_width * char_high
         low = low + range_width * char_low
         calculation_steps.append((char, low, high))
 
+    # берём середину финального интервала как представительный код
     encoded_value = (low + high) / 2
     final_interval = f"[{low}, {high}]"
 
-    with open("encoding_results.txt", "a", encoding="utf-8") as file:
+    # лог пишется в отдельный файл; файл очищается перед каждой записью
+    with open("arithmetic_results.txt", "w", encoding="utf-8") as file:  # отдельный файл на каждую операцию
         file.write("--- Арифметическое кодирование ---\n")
         file.write(f"Исходный текст: {text}\n\n")
-        file.write(f"Частоты символов: {dict(frequencies)}\n")
-        file.write(f"Вероятности символов: {probabilities}\n\n")
+        file.write(f"Частоты символов: {dict(frequencies)}\n")  # словарь символ→частота
+        file.write(f"Вероятности символов: {probabilities}\n\n")  # словарь символ→вероятность
         file.write("Интервалы для каждого символа:\n")
         for char, low_int, high_int in interval_log:
-            file.write(f"  {char}: [{low_int}, {high_int}]\n")
+            file.write(f"  {char}: [{low_int}, {high_int}]\n")  # кумулятивный интервал символа
         file.write("\nПошаговые вычисления:\n")
         for char, low_step, high_step in calculation_steps:
+            # после обработки каждого символа сохраняем текущий рабочий интервал;
+            # из-за использования decimal шаги воспроизводимы и не зависят от платформы
             file.write(f"  Символ '{char}': Интервал после сжатия [{low_step}, {high_step}]\n")
         file.write("\nФИНАЛЬНЫЙ РЕЗУЛЬТАТ:\n")
-        file.write(f"  Интервал: {final_interval}\n")
-        file.write(f"  Закодированное значение: {encoded_value}\n\n")
+        file.write(f"  Интервал: {final_interval}\n")  # итоговый интервал сообщения
+        file.write(f"  Закодированное значение: {encoded_value}\n\n")  # представительный код
 
     return final_interval, encoded_value
 
 
 def bwt_transform(s):
-    rotations = sorted([s[i:] + s[:i] for i in range(len(s))])
+    # преобразование барроуза–уилера (bwt):
+    # 1) строим все циклические сдвиги строки
+    # 2) сортируем их лексикографически
+    # 3) берём последний столбец отсортированной матрицы сдвигов — это и есть bwt-строка
+    rotations = sorted([s[i:] + s[:i] for i in range(len(s))])  # матрица всех циклических сдвигов
     bwt_result = ''.join(rotation[-1] for rotation in rotations)
 
-    with open("encoding_results.txt", "a", encoding="utf-8") as file:
+    # логируем в отдельный файл (очистка при каждом запуске)
+    with open("bwt_results.txt", "w", encoding="utf-8") as file:  # отдельный лог для bwt
         file.write("--- Преобразование BWT ---\n")
         file.write(f"Исходный текст: {s}\n")
         file.write("Отсортированные циклические сдвиги:\n")
         for r in rotations:
-            file.write(f"  {r}\n")
+            file.write(f"  {r}\n")  # каждая строка — один циклический сдвиг
         file.write(f"Результат BWT: {bwt_result}\n\n")
 
     return bwt_result
 
 
 def mtf_encode(bwt_result):
-    alphabet = deque(sorted(set(bwt_result)))
+    # преобразование move-to-front (mtf):
+    # 1) поддерживаем упорядоченный алфавит (очередь)
+    # 2) для каждого символа записываем его индекс в текущем алфавите
+    # 3) перемещаем встретившийся символ в начало (front)
+    alphabet = deque(sorted(set(bwt_result)))  # уникальные символы, отсортированные (стартовый алфавит)
     mtf_result = []
 
-    with open("encoding_results.txt", "a", encoding="utf-8") as file:
+    # логируем вход и шаги mtf в отдельный файл
+    with open("mtf_results.txt", "w", encoding="utf-8") as file:  # отдельный лог для mtf
         file.write("--- Преобразование MTF ---\n")
         file.write(f"Входная строка (результат BWT): {bwt_result}\n")
 
         for char in bwt_result:
-            index = alphabet.index(char)
+            index = alphabet.index(char)  # находим индекс символа в текущем алфавите
             mtf_result.append(index)
             file.write(f"Символ '{char}': Индекс {index}, Алфавит: {list(alphabet)}\n")
+            # переносим символ в начало
             alphabet.remove(char)
             alphabet.appendleft(char)
 
-        file.write(f"\nРезультат MTF: {mtf_result}\n\n")
+        file.write(f"\nРезультат MTF: {mtf_result}\n\n")  # последовательность индексов
 
     return mtf_result
 
 
-# --- Диалоговые окна с увеличенным шрифтом ---
+# --- диалоговые окна с увеличенным шрифтом ---
+# окна ui предназначены для демонстрации работы алгоритмов на примерах.
+# ввод можно редактировать, результат отображается внизу диалога.
 
 class ArithmeticDialog(QDialog):
     def __init__(self, parent=None):
@@ -113,7 +146,7 @@ class ArithmeticDialog(QDialog):
         info_label.setFont(font)
         layout.addWidget(info_label)
 
-        self.text_display = QTextEdit(self)
+        self.text_display = QTextEdit(self)  # поле редактируемого текста; многострочный ввод
         self.text_display.setFont(font)
         self.text_display.setText(self.default_text)
         layout.addWidget(self.text_display)
@@ -123,7 +156,7 @@ class ArithmeticDialog(QDialog):
         self.result_label.setFont(font)
         layout.addWidget(self.result_label)
 
-        show_result_button = QPushButton("Показать результат", self)
+        show_result_button = QPushButton("Показать результат", self)  # запуск кодирования
         show_result_button.setFont(QFont("Arial", 16, QFont.Bold))
         show_result_button.clicked.connect(self.show_result)
         layout.addWidget(show_result_button)
@@ -133,8 +166,31 @@ class ArithmeticDialog(QDialog):
         if not text_to_encode:
             self.result_label.setText("Ошибка: Поле ввода не может быть пустым.")
             return
-        interval, value = arithmetic_encode(text_to_encode)
-        result_text = f"ФИНАЛЬНЫЙ РЕЗУЛЬТАТ:\nИнтервал: {interval}\nЗакодированное значение: {value}"
+        interval, value = arithmetic_encode(text_to_encode)  # лог пишется внутри функции (в свой файл)
+
+        # отображаем округление до 9 знаков (не влияет на запись в файл). округление нужно лишь для удобочитаемости
+        try:
+            interval_body = interval.strip()[1:-1]
+            low_s, high_s = interval_body.split(',')
+            low_d = Decimal(low_s.strip())
+            high_d = Decimal(high_s.strip())
+            q9 = Decimal('0.000000000')
+            low_r = str(low_d.quantize(q9))
+            high_r = str(high_d.quantize(q9))
+            interval_disp = f"[{low_r}, {high_r}]"
+        except Exception:
+            interval_disp = interval
+
+        try:
+            value_d = Decimal(str(value))  # приводим к строке, чтобы не потерять точность при конвертации
+            value_disp = str(value_d.quantize(Decimal('0.000000000')))
+        except Exception:
+            try:
+                value_disp = f"{float(value):.9f}"  # запасной путь, если decimal не сработал
+            except Exception:
+                value_disp = str(value)
+
+        result_text = f"ФИНАЛЬНЫЙ РЕЗУЛЬТАТ:\nИнтервал: {interval_disp}\nЗакодированное значение: {value_disp}"
         self.result_label.setText(result_text)
 
 
@@ -154,7 +210,7 @@ class BwtDialog(QDialog):
         info_label.setFont(font)
         layout.addWidget(info_label)
 
-        self.input_field = QLineEdit(self)
+        self.input_field = QLineEdit(self)  # однострочное поле ввода
         self.input_field.setFont(font)
         self.input_field.setText(self.default_text)
         layout.addWidget(self.input_field)
@@ -164,7 +220,7 @@ class BwtDialog(QDialog):
         self.result_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.result_label)
 
-        show_result_button = QPushButton("Показать результат", self)
+        show_result_button = QPushButton("Показать результат", self)  # запуск bwt
         show_result_button.setFont(QFont("Arial", 16, QFont.Bold))
         show_result_button.clicked.connect(self.show_result)
         layout.addWidget(show_result_button)
@@ -174,7 +230,7 @@ class BwtDialog(QDialog):
         if not text_to_transform:
             self.result_label.setText("Ошибка: Поле ввода не может быть пустым.")
             return
-        result = bwt_transform(text_to_transform)
+        result = bwt_transform(text_to_transform)  # лог пишется внутри функции
         self.result_label.setText(f"Результат BWT: {result}")
 
 
@@ -195,7 +251,7 @@ class MtfDialog(QDialog):
         info_label.setFont(font)
         layout.addWidget(info_label)
 
-        self.input_field = QLineEdit(self)
+        self.input_field = QLineEdit(self)  # однострочное поле ввода
         self.input_field.setFont(font)
         self.input_field.setText(self.default_text)
         layout.addWidget(self.input_field)
@@ -205,7 +261,7 @@ class MtfDialog(QDialog):
         self.result_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.result_label)
 
-        show_result_button = QPushButton("Показать результат", self)
+        show_result_button = QPushButton("Показать результат", self)  # запуск mtf
         show_result_button.setFont(QFont("Arial", 16, QFont.Bold))
         show_result_button.clicked.connect(self.show_result)
         layout.addWidget(show_result_button)
@@ -215,7 +271,7 @@ class MtfDialog(QDialog):
         if not text_to_encode:
             self.result_label.setText("Ошибка: Поле ввода не может быть пустым.")
             return
-        result = mtf_encode(text_to_encode)
+        result = mtf_encode(text_to_encode)  # лог пишется внутри функции
         self.result_label.setText(f"Результат MTF: {result}")
 
 
@@ -225,8 +281,6 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
-        with open("encoding_results.txt", "w", encoding="utf-8") as f:
-            f.write("Результаты выполнения лабораторной работы №3\n\n")
 
     def initUI(self):
         self.setWindowTitle("Кодирование текста (PyQt5)")
